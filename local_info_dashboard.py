@@ -1,4 +1,3 @@
-# local_info_dashboard.py
 # This Streamlit application provides real-time local insights
 # including weather, news, and an interactive map for a specified location.
 
@@ -26,7 +25,8 @@ NEWS_API_KEY = "3560896cacd64d4bbf8ba279e94163ad" # Replace with your NewsAPI ke
 OPENWEATHER_API_KEY = "76455df0e04d5b883f417d724f7052ca" # Replace with your OpenWeatherMap API key
 
 # --- API Endpoints ---
-NEWS_API_BASE_URL = "https://newsapi.org/v2/top-headlines"
+NEWS_API_TOP_HEADLINES_URL = "https://newsapi.org/v2/top-headlines" # For general country headlines
+NEWS_API_EVERYTHING_URL = "https://newsapi.org/v2/everything"     # For searching with a query
 OPENWEATHER_BASE_URL = "https://api.openweathermap.org/data/2.5/weather"
 OPENWEATHER_REVERSE_GEO_URL = "http://api.openweathermap.org/geo/1.0/reverse" 
 
@@ -42,7 +42,7 @@ COUNTRY_NAME_TO_ISO = {
     'New Zealand': 'nz', 'Norway': 'no', 'Philippines': 'ph',
     'Poland': 'pl', 'Portugal': 'pt', 'Romania': 'ro', 'Russia': 'ru',
     'Saudi Arabia': 'sa', 'Serbia': 'rs', 'Singapore': 'sg',
-    'Slovakia': 'sk', 'Slovenia': 'si', 'South Korea': 'kr',
+    'Slovakia': 'sk', 'Slovenia': 'si', 'South Korea': 'kr', 
     'Sweden': 'se', 'Switzerland': 'ch', 'Taiwan': 'tw',
     'Thailand': 'th', 'Turkey': 'tr', 'Ukraine': 'ua',
     'United Arab Emirates': 'ae', 'Venezuela': 've',
@@ -271,8 +271,8 @@ def get_innovative_weather_suggestions(temp, description, wind_speed, humidity, 
 @st.cache_data(ttl=300) # Cache news data for 5 minutes
 def get_news(query: str, country_name: str, api_key: str):
     """
-    Fetches top news headlines for a given query and country.
-    Handles both full country names and ISO 2-letter codes for the country.
+    Fetches news headlines based on query and country.
+    Uses 'everything' endpoint if a query is provided, 'top-headlines' otherwise.
     
     Args:
         query (str): Search query (e.g., city name or topic). Can be empty.
@@ -280,48 +280,68 @@ def get_news(query: str, country_name: str, api_key: str):
         api_key (str): NewsAPI key.
         
     Returns:
-        list: List of news articles, or empty list if an error occurs.
+        dict: A dictionary containing 'articles' (list of news articles) and
+              'iso_code_used' (the 2-letter ISO code actually used for the API call, or None).
+              Returns empty list for articles and None for iso_code_used if an error occurs.
     """
     if not api_key or api_key == "YOUR_NEWS_API_KEY":
         st.error("NewsAPI key is not configured. Please set `NEWS_API_KEY`.")
-        return []
+        return {"articles": [], "iso_code_used": None, "endpoint_info": "N/A (API Key Missing)"}
 
     iso_country_code = None
-    # Check if the input country_name is already a 2-letter ISO code
-    if len(country_name) == 2 and country_name.isalpha():
-        iso_country_code = country_name.lower()
-    else:
-        # Try to map full country name to ISO code
-        iso_country_code = COUNTRY_NAME_TO_ISO.get(country_name.title(), None)
+    standardized_country_name_for_display = country_name # Default for warnings/errors
 
-    if not iso_country_code:
-        # Get the original full name for the warning message
-        display_country_name = ISO_TO_FULL_COUNTRY_NAME.get(country_name.lower(), country_name)
-        st.warning(f"Could not determine 2-letter country code for '{display_country_name}'. NewsAPI 'top-headlines' endpoint requires a valid country code. Attempting to fetch with country code 'us' as a fallback, but results may not be relevant.")
-        iso_country_code = 'us' # Fallback to US if country code not found
-
-    params = {
-        "apiKey": api_key,
-        "pageSize": 5, # Limit to 5 headlines
-        "country": iso_country_code # Country is required for top-headlines
-    }
+    # Try to get ISO code from full country name first
+    iso_country_code = COUNTRY_NAME_TO_ISO.get(country_name.title(), None)
     
-    if query: # Only add 'q' parameter if a query term is provided
-        params["q"] = query
+    # If not found by full name, check if input is already an ISO code
+    if iso_country_code is None and len(country_name) == 2 and country_name.isalpha():
+        iso_country_code = country_name.lower()
+        # Update display name if it was a valid ISO code that maps to a full name
+        standardized_country_name_for_display = ISO_TO_FULL_COUNTRY_NAME.get(country_name.upper(), country_name)
+
+    # Determine which endpoint to use and set parameters accordingly
+    if query:
+        # Use 'everything' endpoint for specific queries
+        url = NEWS_API_EVERYTHING_URL
+        params = {
+            "apiKey": api_key,
+            "q": query, # The query term is mandatory for 'everything'
+            "pageSize": 5,
+            "language": "en" # Limit to English articles for consistency
+        }
+        # The 'everything' endpoint does NOT accept a 'country' parameter.
+        # So news will be global news matching the query.
+        used_endpoint_info = "Everything (global search for query)"
+        effective_country_for_news = None # No country filter for 'everything'
+    else:
+        # Use 'top-headlines' endpoint for general country headlines if no query
+        url = NEWS_API_TOP_HEADLINES_URL
+        if not iso_country_code: # Fallback for country code if still not found
+            st.warning(f"Could not determine 2-letter country code for '{standardized_country_name_for_display}'. NewsAPI 'top-headlines' endpoint requires a valid country code. Attempting to fetch with country code 'us' as a fallback, but results may not be relevant. Check `COUNTRY_NAME_TO_ISO` mapping.")
+            iso_country_code = 'us' # Fallback to US
+        
+        params = {
+            "apiKey": api_key,
+            "country": iso_country_code, # Country is required for 'top-headlines'
+            "pageSize": 5
+        }
+        used_endpoint_info = "Top headlines (country-specific)"
+        effective_country_for_news = iso_country_code # This is the ISO code used
 
     try:
-        response = requests.get(NEWS_API_BASE_URL, params=params, timeout=10)
+        response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
         if data and data.get("articles"):
-            return data["articles"]
-        return []
+            return {"articles": data["articles"], "iso_code_used": effective_country_for_news, "endpoint_info": used_endpoint_info}
+        return {"articles": [], "iso_code_used": effective_country_for_news, "endpoint_info": used_endpoint_info}
     except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching news data: {e}. Please check your NewsAPI key, internet connection, or try a different country/query. NewsAPI's free tier has limitations, including strict rate limits and may not provide hyper-local news.")
-        return []
+        st.error(f"Error fetching news data (Endpoint: {used_endpoint_info}): {e}. Please check your NewsAPI key, internet connection, or try a different country/query. NewsAPI's free tier has limitations, including strict rate limits and may not provide hyper-local news.")
+        return {"articles": [], "iso_code_used": effective_country_for_news, "endpoint_info": used_endpoint_info}
     except json.JSONDecodeError as e:
-        st.error(f"Error decoding news API response: {e}")
-        return []
+        st.error(f"Error decoding news API response (Endpoint: {used_endpoint_info}): {e}")
+        return {"articles": [], "iso_code_used": effective_country_for_news, "endpoint_info": used_endpoint_info}
 
 # --- NLP/Transformer-based News Summary and Sentiment (SIMULATED) ---
 def get_news_summary_and_sentiment(articles: list):
@@ -948,7 +968,7 @@ st.sidebar.markdown("---")
 # Removed "Detect My Current Location" button as it's now automatic
 
 st.sidebar.write("Optional: Filter news headlines.")
-st.session_state.news_query_term = st.sidebar.text_input("News Search Term (Optional):", value=st.session_state.news_query_term, help="e.g., 'local politics', 'sports', 'economy'. Leave empty for general headlines.", key="sidebar_news_query")
+st.session_state.news_query_term = st.sidebar.text_input("News Search Term (Optional):", value=st.session_state.news_query_term, help="e.g., 'local politics', 'sports', 'economy'. Leave empty for general country headlines.", key="sidebar_news_query")
 
 # Button to trigger data fetch (explicitly set insights_triggered)
 if st.sidebar.button("Get Local Insights! 🔄"):
@@ -985,7 +1005,13 @@ if st.session_state.insights_triggered and st.session_state.city_input and st.se
         
         # Fetch data that multiple tabs might need
         weather_data = get_weather(city_to_fetch, country_to_fetch, OPENWEATHER_API_KEY)
-        news_articles = get_news(news_query_to_fetch, country_to_fetch, NEWS_API_KEY)
+        
+        # Call the modified get_news function
+        news_result = get_news(news_query_to_fetch, country_to_fetch, NEWS_API_KEY)
+        news_articles = news_result["articles"]
+        actual_iso_used_for_news = news_result["iso_code_used"] # Extract the ISO code that was actually used
+        endpoint_info_for_news = news_result["endpoint_info"] # Extract endpoint info
+
         transport_data = get_public_transport_status(city_to_fetch, country_to_fetch)
         events_data = get_local_events(city_to_fetch, country_to_fetch)
         env_health_data = get_environmental_health_data(city_to_fetch, country_to_fetch)
@@ -1096,6 +1122,7 @@ if st.session_state.insights_triggered and st.session_state.city_input and st.se
         with tab_news:
             st.header("📰 Latest News")
             with st.spinner(f"Fetching news headlines for {country_to_fetch} (query: '{news_query_to_fetch}' if specified)..."):
+                # Use news_articles and actual_iso_used_for_news that were already fetched
                 if news_articles:
                     summaries, sentiments = get_news_summary_and_sentiment(news_articles)
                     for i, article in enumerate(news_articles):
@@ -1111,7 +1138,17 @@ if st.session_state.insights_triggered and st.session_state.city_input and st.se
                         st.write("---")
                     st.caption("*(AI Summaries and Sentiments are simulated for demonstration, using NLP/Transformer models.)*")
                 else:
-                    st.info(f"No news articles found for '{country_to_fetch}' with query '{news_query_to_fetch}' (if specified), or an error occurred. NewsAPI's 'top-headlines' endpoint primarily provides general country news. Also, remember the free tier has strict rate limits.")
+                    if news_query_to_fetch:
+                        st.info(f"No news articles found for query **'{news_query_to_fetch}'** (using endpoint: **{endpoint_info_for_news}**). This endpoint provides broader search results globally. You might try a different search term or remove the search term to see top headlines for the country.")
+                    else:
+                        st.info(f"""
+                            No news articles found for **'{country_to_fetch}'** (ISO code used: **'{actual_iso_used_for_news.upper() if actual_iso_used_for_news else 'N/A'}'**, using endpoint: **{endpoint_info_for_news}**).
+
+                            **To get South African news (or news from other specific countries):**
+                            NewsAPI's free tier for 'top-headlines' *country* parameter might be limited primarily to 'US' (as per documentation 'Possible options: us').
+                            
+                            **To get relevant South African news, please enter a specific term like 'South Africa', 'Durban', or 'KZN politics' in the 'News Search Term (Optional)' box in the sidebar.** This will use the global search endpoint and provide more relevant results.
+                        """)
 
         # --- Tab 3: Real-time Public Transport Status Section ---
         with tab_transport:
